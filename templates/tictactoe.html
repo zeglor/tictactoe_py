@@ -1,0 +1,184 @@
+<!--
+   chat.html
+   
+   Copyright 2015 zeglor <zeglor@zeglor-desktop>
+   
+   This program is free software; you can redistribute it and/or modify
+   it under the terms of the GNU General Public License as published by
+   the Free Software Foundation; either version 2 of the License, or
+   (at your option) any later version.
+   
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU General Public License for more details.
+   
+   You should have received a copy of the GNU General Public License
+   along with this program; if not, write to the Free Software
+   Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
+   MA 02110-1301, USA.
+   
+   
+-->
+
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN"
+	"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en" lang="en">
+
+<head>
+	<title>untitled</title>
+	<meta http-equiv="content-type" content="text/html;charset=utf-8" />
+	<meta name="generator" content="Geany 1.24.1" />
+	<style type="text/css">
+		TABLE {
+			border-collapse: collapse;
+		}
+		td, th {
+			padding: 3px;
+			border: 1px solid black;
+		}
+		th {
+			background: #b0e0e6;
+		}
+		.token{
+			height: 100px;
+			width: 100px;
+		}
+		#messageString{
+			height: 50px; 
+			width: 100%;
+		}
+	</style>
+	<script src="../static/jquery-2.1.4.min.js"></script>
+	<script type="text/javascript">
+		var canMove = false;
+		var myToken = '';
+		var knownState = 0;
+		var isGameFinished = false;
+		function displayMessage(msg){
+			$("#messageString").text(msg);
+		}
+		
+		function updateGrid(grid){
+			grid.forEach(function(row, y, arr){
+				row.forEach(function(item, x, arr){
+					if(item == '')
+						item = 'e';
+					imagePath = "<img class='token' src='../static/" + item + ".png'>"
+					var cell = $("#grid")[0].rows[y].cells[x];
+					$(cell).html(imagePath);
+				});
+			});
+		}
+		
+		function placeToken(colId, rowId){
+			if(!canMove){
+				alert("Сейчас не Ваш ход!");
+				return;
+			}
+			data = {
+					action: "put",
+					cellRow: rowId,
+					cellCol: colId,
+				};
+			$.ajax({
+				url: "http://127.0.0.1:8080/pub/",
+				type: "POST",
+				contentType: "application/json",
+				dataType: "json",
+				data: JSON.stringify(data),
+				error: function(error){
+					console.log(error);
+				},
+				complete: function(){
+					
+				},
+			});
+		}
+		
+		function poll(){
+			console.log("starting poll");
+			var pollInterval = 0;
+			console.log(knownState);
+			$.ajax({
+				url: 'http://127.0.0.1:8080/sub/',
+				type: 'POST',
+				type: "POST",
+				contentType: "application/json",
+				dataType: "json",
+				data: JSON.stringify({"knownState": knownState}),
+				success: function(data){
+					knownState = data['stateFrame'];
+					switch(data['state']){
+						case 'waitingPlayers':
+							displayMessage('Ждем второго игрока');
+						break
+						case 'active':
+							updateGrid(data['grid']);
+							canMove = data['isYourTurn'];
+							myToken = data['yourToken'];
+							if(canMove){
+								displayMessage("Ваш ход");
+							}
+							else{
+								displayMessage("Ход противника");
+							}
+						break
+						case 'finished':
+							updateGrid(data['grid']);
+							isGameFinished = true;
+							if(data['winner'] == true)
+								displayMessage("Вы победили!");
+							else
+								displayMessage("Ваш противник победил.");
+							
+						break
+					}
+					pollInterval = 0;
+				},
+				error: function(){
+					console.log('error');
+					pollInterval = 1000;
+				},
+				complete: function(){
+					if(isGameFinished == false)
+						setTimeout(poll, pollInterval);
+				},
+			});
+		}
+		
+		$(function(){
+			$("th").click(function(cell){
+				var colId = $(cell.target).parent().attr('name');
+				var rowId = $(cell.target).parent().parent().attr('name');
+				console.log("clicked [" + rowId + ", " + colId + "]")
+				placeToken(colId, rowId);
+			});
+			poll();
+		});
+		
+	</script>
+</head>
+
+<body>
+	<span id="messageString"></span>
+	<table id="grid">
+		<tr name="0">
+			<th name="0"></th>
+			<th name="1"></th>
+			<th name="2"></th>
+		</tr>
+		<tr name="1">
+			<th name="0"></th>
+			<th name="1"></th>
+			<th name="2"></th>
+		</tr>
+		<tr name="2">
+			<th name="0"></th>
+			<th name="1"></th>
+			<th name="2"></th>
+		</tr>
+	</table>
+</body>
+
+</html>
