@@ -22,14 +22,18 @@
 #  
 #  
 
-from gevent import sleep, monkey
+from gevent import sleep, monkey, spawn
 monkey.patch_all()
 from gevent.wsgi import WSGIServer
 from flask import Flask, session, request, render_template, jsonify
-from game import Game, GameController, GameState, Player, Result
+from game import Game, GameController, GameState, Player, Result, cleanup
 from random import randint
+from datetime import datetime
+
+POLL_TIMEOUT = 5
 
 app = Flask(__name__)
+app.debug = True
 app.secret_key = b'\xd0X\xb3\x89\xcf\xef\xd4\x04\xd4c\xa4\xed\x88\xe4\x91B(\x93\xdd\xa2L\xde=k\x9d'
 
 def initPlayer():
@@ -43,11 +47,16 @@ def initPlayer():
 def pub():
 	player = initPlayer()
 	data = request.get_json()
+	cell = None
 	playerAction = data.get('action')
-	cell = [int(data.get('cellCol')), int(data.get('cellRow'))]
 	if playerAction == 'put':
+		cell = [int(data.get('cellCol')), int(data.get('cellRow'))]
 		gameInst = GameController.getGameByPlayer(player)
 		gameInst.processData(player, cell)
+		return jsonify(status='ok')
+	elif playerAction == 'startNew':
+		print("starting new game")
+		gameInst = GameController.startNewGame(player)
 		return jsonify(status='ok')
 
 @app.route("/sub/", methods=["POST", "GET"])
@@ -58,11 +67,19 @@ def sub():
 	if request.method == "GET":
 		return jsonify(gameInst.getStateDict(player))
 	# at this point game with two players has started
-	while (not gameInst.hasUpdatesForPlayer(player)) and (gameInst.state != GameState.finished):
+	pollTime = datetime.now()
+	while (not gameInst.hasUpdatesForPlayer(player)) and \
+		(gameInst.state != GameState.finished) and \
+		(gameInst.state != GameState.playerDisconnected) and \
+		((datetime.now() - pollTime).total_seconds() < POLL_TIMEOUT):
 		sleep(0.1)
+	# at this point player could already be cleaned up
 	if (session.get("id") is None) or (session["id"] != player.key):
 		session["id"] = player.key
 	player.updateKnownState(gameInst)
+	if (datetime.now() - pollTime).total_seconds() >= POLL_TIMEOUT and \
+		(gameInst.state in (GameState.active, GameState.waitingPlayers)):
+		return jsonify(state="pollTimeout")
 	return jsonify(gameInst.getStateDict(player))
 
 @app.route("/")
@@ -70,6 +87,12 @@ def index():
 	return render_template('tictactoe.html')
 
 
+def cleanup_forever():
+	while(True):
+		sleep(2)
+		cleanup()
+
 if __name__ == '__main__':
+	spawn(cleanup_forever)
 	http_server = WSGIServer(('', 8080), app)
 	http_server.serve_forever()

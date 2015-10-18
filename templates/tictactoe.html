@@ -59,6 +59,35 @@
 			$("#messageString").text(msg);
 		}
 		
+		function displayNewGameButton(){
+			$("#startNewGame").show();
+		}
+		
+		function hideNewGameButton(){
+			$("#startNewGame").hide();
+		}
+		
+		function requestStartNewGame(){
+			hideNewGameButton();
+			displayMessage('Ждем второго игрока');
+			isGameFinished = false;
+			data = {action: "startNew"};
+			$.ajax({
+				url: "http://127.0.0.1:8080/pub/",
+				type: "POST",
+				contentType: "application/json",
+				dataType: "json",
+				data: JSON.stringify(data),
+				error: function(error){
+					console.log(error);
+					isGameFinished = true;
+				},
+				complete: function(){
+					poll();
+				},
+			});
+		}
+		
 		function updateGrid(grid){
 			grid.forEach(function(row, y, arr){
 				row.forEach(function(item, x, arr){
@@ -108,10 +137,12 @@
 				dataType: "json",
 				data: JSON.stringify({"knownState": knownState}),
 				success: function(data){
+					console.log(data);
 					knownState = data['stateFrame'];
 					switch(data['state']){
 						case 'waitingPlayers':
 							displayMessage('Ждем второго игрока');
+							isGameFinished = false;
 						break
 						case 'active':
 							updateGrid(data['grid']);
@@ -123,6 +154,7 @@
 							else{
 								displayMessage("Ход противника");
 							}
+							isGameFinished = false;
 						break
 						case 'finished':
 							updateGrid(data['grid']);
@@ -131,7 +163,14 @@
 								displayMessage("Вы победили!");
 							else
 								displayMessage("Ваш противник победил.");
-							
+							displayNewGameButton();
+						break
+						case 'playerDisconnected':
+							isGameFinished = true;
+							displayMessage("Противник отключился. Попытаемся найти нового?");
+							displayNewGameButton();
+						case 'pollTimeout':
+							console.log("server poll timeout. reconnecting");
 						break
 					}
 					pollInterval = 0;
@@ -154,6 +193,10 @@
 				console.log("clicked [" + rowId + ", " + colId + "]")
 				placeToken(colId, rowId);
 			});
+			$("#startNewGame").click(function(){
+				requestStartNewGame();
+			});
+			hideNewGameButton();
 			poll();
 		});
 		
@@ -162,6 +205,7 @@
 
 <body>
 	<span id="messageString"></span>
+	<button id="startNewGame">Начать новую игру</button>
 	<table id="grid">
 		<tr name="0">
 			<th name="0"></th>

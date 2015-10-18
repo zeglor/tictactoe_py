@@ -22,17 +22,22 @@
 #  
 #  
 
-from gevent import monkey
+from gevent import monkey, sleep
 monkey.patch_all()
 from enum import Enum
 from collections import deque
 from random import choice
 from uuid import uuid4
+from datetime import datetime
+from copy import deepcopy
+
+CONNECTION_TIMEOUT = 10			# max time since last request until the player is considered disconnected
 
 class GameState(Enum):
 	waitingPlayers = 1
 	active = 2
 	finished = 3
+	playerDisconnected = 4
 
 class Result(Enum):
 	ok = 1
@@ -43,13 +48,13 @@ class Game:
 		self.players = [player, None] 		# player[0] is 'o', player[1] is 'x'
 		self.activePlayer = None			# whose turn is now?
 		self.grid = ['' for _ in range(9)]	# 3x3 game grid
-		self.state = GameState.waitingPlayers
 		# This variable is needed to keep in sync with both players. It is
 		# incremented each time game state is updated (e.g. player makes a move).
 		# Each player stores his value of stateFrame, so if player's copy is
 		# less than game's, his game state is outdated
 		self.stateFrame = 1
 		self.winner = None
+		self.state = GameState.waitingPlayers
 	
 	def addPlayer(self, player):
 		self.players[1] = player
@@ -116,16 +121,45 @@ class Game:
 			string += '\n'
 		return string
 	
+	def reportDead(self, player):
+		if player not in self.players:
+			# Wrong player, we don't know anything about him
+			return
+		# Some player disconnected. Is anyone left?
+		if self.state == GameState.playerDisconnected:
+			self.kill()
+			return
+		activePlayer = None
+		if self.players[0] is not None:
+			activePlayer = self.players[0]
+		if self.players[1] is not None:
+			activePlayer = self.players[1]
+		self.__init__(activePlayer)
+		self.state = GameState.playerDisconnected
+		self._updateGame()
+	
+	def kill(self):
+		GameController.removeGame(self)
+	
+	def otherPlayer(self, player):
+		if player == self.players[0]:
+			return self.players[1]
+		elif player == self.players[1]:
+			return self.players[0]
+		else:
+			return None
+	
 	def _updateGame(self):
 		# check if anyone won
-		winner = self._getWinner()
-		if (winner in self.players) or ('' not in self.grid):
-			self.state = GameState.finished
-			self.winner = self._getWinner()
-		if self.activePlayer == self.players[0]:
-			self.activePlayer = self.players[1]
-		else:
-			self.activePlayer = self.players[0]
+		if self.state == GameState.active:
+			winner = self._getWinner()
+			if (winner in self.players) or ('' not in self.grid):
+				self.state = GameState.finished
+				self.winner = self._getWinner()
+			if self.activePlayer == self.players[0]:
+				self.activePlayer = self.players[1]
+			else:
+				self.activePlayer = self.players[0]
 		self.stateFrame += 1
 	
 	def _getPlayerToken(self, player):
@@ -168,14 +202,17 @@ class GameController:
 	
 	@staticmethod
 	def getOrCreateGame(player):
+		print("getting game for {}".format(player.key))
 		gameInst = GameController.gamesByPlayer.get(player.key)
 		if gameInst is None:
 			if len(GameController.gamesWaiting) == 0:
+				print("making new for {}".format(player.key))
 				gameInst = Game(player)
 				GameController.gamesWaiting.appendleft(gameInst)
 				GameController.gameList.append(gameInst)
 				GameController.gamesByPlayer[player.key] = gameInst
 			else:
+				print("appending to existing game for {}".format(player.key))
 				gameInst = GameController.gamesWaiting.pop()
 				GameController.gamesByPlayer[player.key] = gameInst
 				gameInst.addPlayer(player)
@@ -186,34 +223,123 @@ class GameController:
 		gameInst = GameController.gamesByPlayer.get(player.key)
 		return gameInst
 	
+	@staticmethod
+	def startNewGame(player):
+		gameInst = GameController.getGameByPlayer(player)
+		if gameInst is not None:
+			otherPlayer = gameInst.otherPlayer(player)
+			try:
+				del GameController.gamesByPlayer[otherPlayer.key]
+			except KeyError:
+				pass
+			gameInst.__init__(player)
+			if gameInst not in GameController.gamesWaiting:
+				GameController.gamesWaiting.appendleft(gameInst)
+		print(GameController.gameList)
+		print(GameController.gamesByPlayer)
+		print(GameController.gamesWaiting)
+		gameInst = GameController.getOrCreateGame(player)
+		player.knownGameState = 0
+		player.saveData()
+		return gameInst
+	
+	@staticmethod
+	def removePlayer(player):
+		try:
+			del GameController.gamesByPlayer[player.key]
+		except KeyError:
+			pass
+	
+	@staticmethod
+	def removeGame(game):
+		try:
+			GameController.gameList.remove(game)
+			GameController.gamesWaiting.remove(game)
+			del game
+		except ValueError:
+			pass
+
 class Player:
+	class PlayerData:
+		def __init__(self, lastSeen, knownGameState):
+			self.lastSeen = lastSeen
+			self.knownGameState = knownGameState
+			
 	knownIds = set()
-	knownGameStates = {}
+	knownPlayers = {}			#dict of player.key => PlayerData
+	
 	def __init__(self, playerId=None):
 		self.key = playerId			# app-wide unique key
-		self.knownGameState = 0	# increments as player receives updates
+		self.knownGameState = 0		# increments as player receives updates
 		if self.key is None:
 			self.key = Player._makeUniqueKey()
 			Player.knownIds.add(self.key)
 			self.knownGameState = 0
+			self.lastSeen = datetime.now()
 		else:
-			self.knownGameState = Player.knownGameStates[self.key]
+			savedPlayer = None
+			try:
+				savedPlayer = Player.knownPlayers[self.key]
+				self.knownGameState = savedPlayer.knownGameState
+				self.lastSeen = savedPlayer.lastSeen
+			except KeyError:
+				self.__init__()
+		saveObj = Player.PlayerData(self.lastSeen, self.knownGameState)
+		Player.knownPlayers[self.key] = saveObj
 	
 	@staticmethod
 	def initialize(playerId=None, knownState = None):
+		player = None
 		if (playerId is not None) and (playerId in Player.knownIds):
 			player = Player(playerId)
 		else:
 			player = Player()
+		dt = datetime.now() - player.lastSeen
+		#if dt.total_seconds() > CONNECTION_TIMEOUT:
+		#	Player.kill(player.key)
+		#	player = Player()
+		player.lastSeen = datetime.now()
 		return player
 	
 	@staticmethod
 	def _makeUniqueKey():
 		return uuid4()
 	
-	def updateKnownState(self, game):
+	def updateKnownState(self, game, knownGameState = None):
 		self.knownGameState = game.stateFrame
-		Player.knownGameStates[self.key] = self.knownGameState
+		savedPlayer = None
+		try:
+			savedPlayer = Player.knownPlayers[self.key]
+			savedPlayer.knownGameState = self.knownGameState
+			savedPlayer.lastSeen = self.lastSeen
+		except KeyError:
+			pass
+	
+	def saveData(self):
+		savedPlayer = None
+		try:
+			savedPlayer = Player.knownPlayers[self.key]
+		except KeyError:
+			savedPlayer = Player.PlayerData(self.lastSeen, self.knownGameState)
+		savedPlayer.knownGameState = self.knownGameState
+		savedPlayer.lastSeen = self.lastSeen
+	
+	@staticmethod
+	def kill(key):
+		"""
+		cleanups player data
+		"""
+		player = Player(key)
+		#report to corresponding game instance
+		gameInst = GameController.getGameByPlayer(player)
+		if gameInst is not None:
+			gameInst.reportDead(player)
+		try:
+			Player.knownIds.remove(key)
+			del Player.knownPlayers[key]
+			GameController.removePlayer(player)
+		except KeyError:
+			pass
 	
 	def __eq__(self, other):
 		if (other is not None) and (self.key == other.key):
@@ -223,6 +349,22 @@ class Player:
 	
 	def __str__(self):
 		return str(self.key)
+
+def cleanup():
+	numCleaned = 0
+	curTime = datetime.now()
+	for key in Player.knownIds.copy():
+		obj = None
+		try:
+			obj = Player.knownPlayers[key]
+			dt = curTime - obj.lastSeen
+			if dt.total_seconds() > CONNECTION_TIMEOUT:
+				Player.kill(key)
+				numCleaned += 1
+		except KeyError:
+			pass
+	print("cleaned {} players".format(numCleaned))
+	return numCleaned
 
 def main():
 	player = Player.initialize()
@@ -254,6 +396,10 @@ def main():
 	print(gameInst.gridString())
 	print(gameInst.winner)
 	print(gameInst.state)
+	
+	print(cleanup())
+	sleep(10)
+	print(cleanup())
 	
 	return 0
 
