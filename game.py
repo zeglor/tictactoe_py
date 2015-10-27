@@ -25,67 +25,146 @@
 from gevent import monkey, sleep
 monkey.patch_all()
 from enum import Enum
-from collections import deque
 from random import choice
-from uuid import uuid4
 from datetime import datetime
-from copy import deepcopy
+from db import DbTest as Db
+import json
 
 CONNECTION_TIMEOUT = 10			# max time since last request until the player is considered disconnected
+GAME_WAITING_QUEUE = "game_waiting_queue"
+
+class EnumEncoder(json.JSONEncoder):
+	def default(self, obj):
+		if isinstance(obj, Enum):
+			return {"__enum__": str(obj)}
+		return json.JSONEncoder.default(self, obj)
+
+def as_enum(d):
+	if "__enum__" in d:
+		name, member = d["__enum__"].split(".")
+		return getattr(globals()[name], member)
+	return d
+
+class Persistent:
+	"""
+	classes that may be saved and retrieved should implement this interface
+	"""
+	def __init__(self, key):
+		self._key = key
+	def serialize(self):
+		pass
+	def deserialize(self, objStr):
+		pass
 
 class GameState(Enum):
-	waitingPlayers = 1
-	active = 2
-	finished = 3
-	playerDisconnected = 4
-
-class Result(Enum):
-	ok = 1
-	error = 2
+	idle = 1
+	searchingPlayers = 2
+	active = 3
+	playerLeft = 4
+	finished = 5
 	
 class Game:
-	def __init__(self, player):
-		self.players = [player, None] 		# player[0] is 'o', player[1] is 'x'
-		self.activePlayer = None			# whose turn is now?
-		self.grid = ['' for _ in range(9)]	# 3x3 game grid
+	@staticmethod
+	def findNew(player):
+		db = Db.instance()
+		game = None
+		# check if there are any games waiting for second player
+		if db.lenList(GAME_WAITING_QUEUE) > 0:
+			# if there are, remove one from queue
+			print("Found existing game")
+			gameKey = db.listPopLeft(GAME_WAITING_QUEUE)
+			game = Game(gameKey)
+		else:
+			# if not, create new game and append it to waiting list
+			game = Game()
+			game.state = GameState.searchingPlayers
+			db.listAppend(GAME_WAITING_QUEUE, game.key)
+		game.addPlayer(player)
+		return game
+	
+	def __init__(self, key=None):
+		self.key = key
+		self.players = []		# player[0] is 'o', player[1] is 'x'
+		self.activePlayer = None				# whose turn is now?
+		self.grid = ['' for _ in range(9)]		# 3x3 game grid
 		# This variable is needed to keep in sync with both players. It is
 		# incremented each time game state is updated (e.g. player makes a move).
 		# Each player stores his value of stateFrame, so if player's copy is
-		# less than game's, his game state is outdated
-		self.stateFrame = 1
+		# less than game's, his game state is considered outdated
+		self.stateFrame = 0
 		self.winner = None
-		self.state = GameState.waitingPlayers
+		self.state = GameState.idle
+		
+		db = Db.instance()
+		if self.key is None or db.retrieve(self.key) is None:
+			self.key = db.generateKey()
+		else:
+			self.deserialize(db.retrieve(self.key))
+			self.checkIfPlayersActive()
+	
+	def serialize(self):
+		obj = {}
+		obj["key"] = self.key
+		obj["players"] = [player.key for player in self.players]
+		obj["activePlayer"] = self.activePlayer.key if self.activePlayer is not None else None
+		obj["grid"] = self.grid
+		obj["stateFrame"] = self.stateFrame
+		obj["winner"] = self.winner
+		obj["state"] = self.state
+		return json.dumps(obj, cls=EnumEncoder)
+	
+	def deserialize(self, objStr):
+		obj = json.loads(objStr, object_hook=as_enum)
+		self.key = obj["key"]
+		playerKeys = obj["players"]
+		try:
+			playerKeys.remove(None)
+		except ValueError:
+			pass
+		self.players = [Player(key) for key in playerKeys]
+		self.activePlayer = Player(obj["activePlayer"]) if obj["activePlayer"] is not None else None
+		self.grid = obj["grid"]
+		self.stateFrame = obj["stateFrame"]
+		self.winner = obj["winner"]
+		self.state = obj["state"]
+	
+	def dbSave(self):
+		Db.instance().store(self.key, self.serialize())
+	
+	def __str__(self):
+		if len(self.players) == 2:
+			return "Game. key: {}, players: [{}, {}]".format(self.key, self.players[0], self.players[1])
+		elif len(self.players) == 1:
+			return "Game. key: {}, players: [{}]".format(self.key, self.players[0])
+		else:
+			return "Game. key: {}, players: []".format(self.key)
+	
+	def checkIfPlayersActive(self):
+		if self.state != GameState.active:
+			return
+		
+		if None in self.players or len(self.players) < 2:
+			self.players.remove(None)
+			self.state = GameState.playerLeft
+			self.stateFrame += 1
 	
 	def addPlayer(self, player):
-		self.players[1] = player
-		self.state = GameState.active
-		# choose player to make first move
-		self.activePlayer = choice(self.players)
-		self._updateGame()
+		self.players.append(player)
+		if len(self.players) == 2:
+			self.state = GameState.active
+			self.activePlayer = choice(self.players)
+			self.stateFrame += 1
 	
 	def makeMove(self, player, cellIndx):
 		if self.state != GameState.active or player != self.activePlayer:
-			return Result.error
+			raise RuntimeError("this player cannot move")
 		
 		gridIndx = 3 * cellIndx[1] + cellIndx[0]
 		if self.grid[gridIndx] == '':
 			self.grid[gridIndx] = self._getPlayerToken(player)
-			self._updateGame()
-			return Result.ok
-		return Result.error
-	
-	def processData(self, player, move):
-		if self.state == GameState.waitingPlayers:
-			if player[0] != player:
-				self.addPlayer(player)
-				return Result.ok
-			else:
-				return Result.error
-		elif self.state == GameState.active:
-			self.makeMove(player, move)
-			return Result.ok
 		else:
-			return Result.error
+			raise RuntimeError("this player cannot move here")
+		self.update()
 	
 	def hasUpdatesForPlayer(self, player):
 		return self.stateFrame > player.knownGameState
@@ -121,26 +200,6 @@ class Game:
 			string += '\n'
 		return string
 	
-	def reportDead(self, player):
-		if player not in self.players:
-			# Wrong player, we don't know anything about him
-			return
-		# Some player disconnected. Is anyone left?
-		if self.state == GameState.playerDisconnected:
-			self.kill()
-			return
-		activePlayer = None
-		if self.players[0] is not None:
-			activePlayer = self.players[0]
-		if self.players[1] is not None:
-			activePlayer = self.players[1]
-		self.__init__(activePlayer)
-		self.state = GameState.playerDisconnected
-		self._updateGame()
-	
-	def kill(self):
-		GameController.removeGame(self)
-	
 	def otherPlayer(self, player):
 		if player == self.players[0]:
 			return self.players[1]
@@ -149,18 +208,18 @@ class Game:
 		else:
 			return None
 	
-	def _updateGame(self):
+	def update(self):
 		# check if anyone won
 		if self.state == GameState.active:
 			winner = self._getWinner()
 			if (winner in self.players) or ('' not in self.grid):
 				self.state = GameState.finished
+				self.stateFrame += 1
 				self.winner = self._getWinner()
 			if self.activePlayer == self.players[0]:
 				self.activePlayer = self.players[1]
 			else:
 				self.activePlayer = self.players[0]
-		self.stateFrame += 1
 	
 	def _getPlayerToken(self, player):
 		assert player in self.players
@@ -192,216 +251,130 @@ class Game:
 			(self.grid[2] == token and self.grid[4] == token and self.grid[6] == token)
 		)
 
-class GameController:
-	gameList = []
-	gamesByPlayer = {}
-	gamesWaiting = deque()
-	
-	def __init__(self):
-		pass
-	
-	@staticmethod
-	def getOrCreateGame(player):
-		print("getting game for {}".format(player.key))
-		gameInst = GameController.gamesByPlayer.get(player.key)
-		if gameInst is None:
-			if len(GameController.gamesWaiting) == 0:
-				print("making new for {}".format(player.key))
-				gameInst = Game(player)
-				GameController.gamesWaiting.appendleft(gameInst)
-				GameController.gameList.append(gameInst)
-				GameController.gamesByPlayer[player.key] = gameInst
-			else:
-				print("appending to existing game for {}".format(player.key))
-				gameInst = GameController.gamesWaiting.pop()
-				GameController.gamesByPlayer[player.key] = gameInst
-				gameInst.addPlayer(player)
-		return gameInst
-	
-	@staticmethod
-	def getGameByPlayer(player):
-		gameInst = GameController.gamesByPlayer.get(player.key)
-		return gameInst
-	
-	@staticmethod
-	def startNewGame(player):
-		gameInst = GameController.getGameByPlayer(player)
-		if gameInst is not None:
-			otherPlayer = gameInst.otherPlayer(player)
-			try:
-				del GameController.gamesByPlayer[otherPlayer.key]
-			except KeyError:
-				pass
-			gameInst.__init__(player)
-			if gameInst not in GameController.gamesWaiting:
-				GameController.gamesWaiting.appendleft(gameInst)
-		print(GameController.gameList)
-		print(GameController.gamesByPlayer)
-		print(GameController.gamesWaiting)
-		gameInst = GameController.getOrCreateGame(player)
-		player.knownGameState = 0
-		player.saveData()
-		return gameInst
-	
-	@staticmethod
-	def removePlayer(player):
-		try:
-			del GameController.gamesByPlayer[player.key]
-		except KeyError:
-			pass
-	
-	@staticmethod
-	def removeGame(game):
-		try:
-			GameController.gameList.remove(game)
-			GameController.gamesWaiting.remove(game)
-			del game
-		except ValueError:
-			pass
-
-class Player:
-	class PlayerData:
-		def __init__(self, lastSeen, knownGameState):
-			self.lastSeen = lastSeen
-			self.knownGameState = knownGameState
-			
-	knownIds = set()
-	knownPlayers = {}			#dict of player.key => PlayerData
-	
+class Player(Persistent):
 	def __init__(self, playerId=None):
+		super().__init__(playerId)
 		self.key = playerId			# app-wide unique key
 		self.knownGameState = 0		# increments as player receives updates
+		self.game = None			# the game this player currently bound to
+		
+		db = Db.instance()
+		# Generate key if needed
 		if self.key is None:
-			self.key = Player._makeUniqueKey()
-			Player.knownIds.add(self.key)
-			self.knownGameState = 0
-			self.lastSeen = datetime.now()
+			self.key = db.generateKey()
+		# Check if player with such key exists. If he does, retrieve his
+		# info from db. If he does not, create him
+		if db.keyExists(self.key):
+			self.deserialize(db.retrieve(self.key))
 		else:
-			savedPlayer = None
-			try:
-				savedPlayer = Player.knownPlayers[self.key]
-				self.knownGameState = savedPlayer.knownGameState
-				self.lastSeen = savedPlayer.lastSeen
-			except KeyError:
-				self.__init__()
-		saveObj = Player.PlayerData(self.lastSeen, self.knownGameState)
-		Player.knownPlayers[self.key] = saveObj
+			db.store(self.key, self.serialize())
 	
-	@staticmethod
-	def initialize(playerId=None, knownState = None):
-		player = None
-		if (playerId is not None) and (playerId in Player.knownIds):
-			player = Player(playerId)
+	def serialize(self):
+		obj = {
+			'key': self.key,
+			'knownGameState': self.knownGameState,
+			'gameKey': self.game.key if self.game is not None else None
+		}
+		return json.dumps(obj)
+	
+	def deserialize(self, objStr):
+		obj = json.loads(objStr)
+		self.key = obj['key']
+		self.knownGameState = obj['knownGameState']
+		if obj['gameKey'] is not None and Db.instance().keyExists(obj['gameKey']):
+			self.game = Game(obj['gameKey'])
 		else:
-			player = Player()
-		dt = datetime.now() - player.lastSeen
-		#if dt.total_seconds() > CONNECTION_TIMEOUT:
-		#	Player.kill(player.key)
-		#	player = Player()
-		player.lastSeen = datetime.now()
-		return player
+			self.game = None
 	
-	@staticmethod
-	def _makeUniqueKey():
-		return uuid4()
+	def startOrJoinGame(self):
+		# If the player is already taking part in some game, remove him from it
+		if self.game is not None:
+			self.game.removePlayer(self)
+		self.reset()
+		self.game = Game.findNew(self)
 	
-	def updateKnownState(self, game, knownGameState = None):
-		self.knownGameState = game.stateFrame
-		savedPlayer = None
-		try:
-			savedPlayer = Player.knownPlayers[self.key]
-			savedPlayer.knownGameState = self.knownGameState
-			savedPlayer.lastSeen = self.lastSeen
-		except KeyError:
-			pass
-	
-	def saveData(self):
-		savedPlayer = None
-		try:
-			savedPlayer = Player.knownPlayers[self.key]
-		except KeyError:
-			savedPlayer = Player.PlayerData(self.lastSeen, self.knownGameState)
-		savedPlayer.knownGameState = self.knownGameState
-		savedPlayer.lastSeen = self.lastSeen
-	
-	@staticmethod
-	def kill(key):
+	def reset(self):
 		"""
-		cleanups player data
+		Resets player state so that he could join new game
 		"""
-		player = Player(key)
-		#report to corresponding game instance
-		gameInst = GameController.getGameByPlayer(player)
-		if gameInst is not None:
-			gameInst.reportDead(player)
-		try:
-			Player.knownIds.remove(key)
-			del Player.knownPlayers[key]
-			GameController.removePlayer(player)
-		except KeyError:
-			pass
+		self.knownGameState = 0
+		self.game = None
 	
-	def __eq__(self, other):
-		if (other is not None) and (self.key == other.key):
-			return True
-		else:
-			return False
+	def dbSave(self):
+		"""
+		This method is called whenever player state needs to be saved in database
+		"""
+		Db.instance().store(self.key, self.serialize())
 	
 	def __str__(self):
-		return str(self.key)
+		return "Player key: {}".format(self.key)
+	
+	def __eq__(self, other):
+		return other is not None and self.key == other.key
 
 def cleanup():
+	"""
+	This function should run in separate greenlet with some time interval.
+	It iterates through games queue and checks if they have at least one player.
+	If they dont, it removes given games from list
+	"""
+	db = Db.instance()
 	numCleaned = 0
-	curTime = datetime.now()
-	for key in Player.knownIds.copy():
-		obj = None
-		try:
-			obj = Player.knownPlayers[key]
-			dt = curTime - obj.lastSeen
-			if dt.total_seconds() > CONNECTION_TIMEOUT:
-				Player.kill(key)
-				numCleaned += 1
-		except KeyError:
-			pass
-	print("cleaned {} players".format(numCleaned))
-	return numCleaned
+	for gameKey in db.retrieveList(GAME_WAITING_QUEUE):
+		game = Game(gameKey)
+		if len(game.players) == 0:
+			db.removeFromList(GAME_WAITING_QUEUE, gameKey)
+			numCleaned += 1
+	print("cleaned {} games".format(numCleaned))
 
 def main():
-	player = Player.initialize()
-	gameInst = GameController.getOrCreateGame(player)
-	print(gameInst)
+	# just checking player state persistence
+	player = Player()
+	player.dbSave()
+	print(player)
+	playerKey = player.key
+	del player
+	player = Player(playerKey)
+	print(player)
+	assert player.key == playerKey
 	
-	player2 = Player.initialize()
-	gameInst = GameController.getOrCreateGame(player2)
-	print(gameInst)
-	print(gameInst.players)
+	player.startOrJoinGame()
+	print(player.game)
+	player.game.dbSave()
+	del player
 	
-	print(gameInst.activePlayer)
-	# one of these moves should be valid
-	res = gameInst.makeMove(player, [0,0])
-	print(res)
-	res = gameInst.makeMove(player2, [0,0])
-	print(res)
-	print(gameInst.gridString())
-	print(gameInst.activePlayer)
-	activePlayer = gameInst.activePlayer
-	res = gameInst.makeMove(activePlayer, [0,1])
-	activePlayer = gameInst.activePlayer
-	res = gameInst.makeMove(activePlayer, [1,1])
-	activePlayer = gameInst.activePlayer
-	res = gameInst.makeMove(activePlayer, [0,2])
-	print(gameInst.gridString())
-	activePlayer = gameInst.activePlayer
-	res = gameInst.makeMove(activePlayer, [2,2])
-	print(gameInst.gridString())
-	print(gameInst.winner)
-	print(gameInst.state)
+	secondPlayer = Player()
+	print("Second {}".format(secondPlayer))
+	secondPlayer.startOrJoinGame()
+	secondPlayer.dbSave()
 	
-	print(cleanup())
-	sleep(10)
-	print(cleanup())
+	game = secondPlayer.game
+	print(game)
+	player = Player(playerKey)
 	
-	return 0
+	print(game.gridString())
+	
+	player = game.activePlayer
+	game.makeMove(player, [0,0])
+	print(game.gridString())
+	player = game.activePlayer
+	game.makeMove(player, [0,1])
+	print(game.gridString())
+	player = game.activePlayer
+	game.makeMove(player, [1,0])
+	print(game.gridString())
+	player = game.activePlayer
+	game.makeMove(player, [0,2])
+	print(game.gridString())
+	player = game.activePlayer
+	game.makeMove(player, [2,0])
+	print(game.gridString())
+	player = game.activePlayer
+	try:
+		game.makeMove(player, [1,1])
+		print(game.gridString())
+	except RuntimeError:
+		print("Good, good. Expected exception")
 
 if __name__ == '__main__':
 	main()
