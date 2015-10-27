@@ -26,15 +26,16 @@ from gevent import sleep, monkey, spawn
 monkey.patch_all()
 from gevent.wsgi import WSGIServer
 from flask import Flask, session, request, render_template, jsonify
-from game import Game, GameController, GameState, Player, Result, cleanup
+from game import Game, GameState, Player, cleanup
 from random import randint
 from datetime import datetime
+from secret import secret_key
 
 POLL_TIMEOUT = 5
 
 app = Flask(__name__)
 app.debug = True
-app.secret_key = b'\xd0X\xb3\x89\xcf\xef\xd4\x04\xd4c\xa4\xed\x88\xe4\x91B(\x93\xdd\xa2L\xde=k\x9d'
+app.secret_key = secret_key
 
 def initPlayer():
 	playerId = session.get('id')
