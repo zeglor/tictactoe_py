@@ -320,12 +320,16 @@ def cleanup():
 	"""
 	db = Db.instance()
 	numCleaned = 0
-	for gameKey in db.retrieveList(GAME_WAITING_QUEUE):
+	gamesQueue = db.retrieveList(GAME_WAITING_QUEUE)
+	if gamesQueue is None:
+		return
+	for gameKey in gamesQueue:
 		game = Game(gameKey)
 		if len(game.players) == 0:
 			db.removeFromList(GAME_WAITING_QUEUE, gameKey)
 			numCleaned += 1
-	print("cleaned {} games".format(numCleaned))
+	if numCleaned > 0:
+		print("cleaned {} games".format(numCleaned))
 
 def main():
 	# just checking player state persistence

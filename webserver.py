@@ -20,7 +20,12 @@
 #  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston,
 #  MA 02110-1301, USA.
 #  
-#  
+
+# Player message looks something like that: {"action": action_requested}
+# What messages is player able to send us:
+# * Report that he's still online (should not be called that often)		{"action": "heartbeat"}
+# * Request a new game to join											{"action": "joinGame" }
+# * Report his move														{"action": "move", "cell": [x, y]}
 
 from gevent import sleep, monkey, spawn
 monkey.patch_all()
@@ -33,55 +38,66 @@ from secret import secret_key
 
 POLL_TIMEOUT = 5
 
+class RemotePlayer:
+	def __init__(self, session):
+		playerKey = session.get("id")
+		self.player = Player(playerKey)
+		session["id"] = self.player.key
+		self.player.dbSave()
+		if self.player.game is not None:
+			self.player.game.dbSave()
+	
+	def __enter__(self):
+		return self.player
+	
+	def __exit__(self, type, value, traceback):
+		self.player.dbSave()
+		if self.player.game is not None:
+			self.player.game.dbSave()
+
 app = Flask(__name__)
 app.debug = True
 app.secret_key = secret_key
 
-def initPlayer():
-	playerId = session.get('id')
-	data = request.get_json()
-	knownState = data.get('knownState')
-	player = Player.initialize(playerId, knownState)
-	return player
-
 @app.route("/pub/", methods=["POST"])
 def pub():
-	player = initPlayer()
-	data = request.get_json()
-	cell = None
-	playerAction = data.get('action')
-	if playerAction == 'put':
-		cell = [int(data.get('cellCol')), int(data.get('cellRow'))]
-		gameInst = GameController.getGameByPlayer(player)
-		gameInst.processData(player, cell)
-		return jsonify(status='ok')
-	elif playerAction == 'startNew':
-		print("starting new game")
-		gameInst = GameController.startNewGame(player)
-		return jsonify(status='ok')
+	with RemotePlayer(session) as player:
+		data = request.get_json()
+		action = data.get("action")
+		
+		#process requested action
+		if action == "heartbeat":
+			print("heartbeat from {}".format(player))
+			# player gets automatically updated after request is finished
+			pass
+		elif action == "joinGame":
+			print("joining game: {}".format(player))
+			player.startOrJoinGame()
+		elif action == "move":
+			print("making move: {}".format(player))
+			cellIndex = data.get("cell")
+			player.game.makeMove(player, cellIndex)
+	return 'OK'
 
-@app.route("/sub/", methods=["POST", "GET"])
+@app.route("/sub/", methods=["POST"])
 def sub():
-	player = initPlayer()
+	def timeoutPassed():
+		return (datetime.now() - self.pollTime).total_seconds() >= POLL_TIMEOUT
 	
-	gameInst = GameController.getOrCreateGame(player)
-	if request.method == "GET":
-		return jsonify(gameInst.getStateDict(player))
-	# at this point game with two players has started
-	pollTime = datetime.now()
-	while (not gameInst.hasUpdatesForPlayer(player)) and \
-		(gameInst.state != GameState.finished) and \
-		(gameInst.state != GameState.playerDisconnected) and \
-		((datetime.now() - pollTime).total_seconds() < POLL_TIMEOUT):
-		sleep(0.1)
-	# at this point player could already be cleaned up
-	if (session.get("id") is None) or (session["id"] != player.key):
-		session["id"] = player.key
-	player.updateKnownState(gameInst)
-	if (datetime.now() - pollTime).total_seconds() >= POLL_TIMEOUT and \
-		(gameInst.state in (GameState.active, GameState.waitingPlayers)):
-		return jsonify(state="pollTimeout")
-	return jsonify(gameInst.getStateDict(player))
+	with RemotePlayer(session) as player:
+		game = player.game
+		if game is None:
+			return jsonify({"type": "error", "reason": "not_connected"})
+		timeoutPassed.pollTime = datetime.now()
+		while (not game.hasUpdatesForPlayer(player)) and (not timeoutPassed()):
+			sleep(0.1)
+		# now we either have updates for player, or timeout passed
+		if timeoutPassed():
+			return jsonify({"type": "timeout"})
+		else:
+			msg = gameInst.getStateDict(player)
+			msg["type"] = "event"
+			return jsonify(msg)
 
 @app.route("/")
 def index():
