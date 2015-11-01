@@ -67,21 +67,16 @@ def pub():
     with RemotePlayer(session, request) as player:
         data = request.get_json()
         action = data.get("action")
-        #print("got request of type {}".format(action))
-
         # process requested action
         if action == "heartbeat":
-            #print("heartbeat from {}".format(player))
             # player gets automatically updated after request is finished
             # we should store only game state
             if player.game is not None:
                 player.game.dbSave()
         elif action == "joinGame":
-            #print('joining game: {}'.format(player))
             # pdb.set_trace()
             player.startOrJoinGame()
         elif action == "move":
-            #print("making move: {}".format(player))
             cellIndex = [int(indx) for indx in data.get("cell")]
             player.game.makeMove(player, cellIndex)
     return jsonify({'status': 'ok'})

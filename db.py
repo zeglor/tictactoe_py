@@ -133,13 +133,7 @@ class DbRedis(Db):
 
 
 def main():
-    db = DbRedis.instance()
-    objSerial = "test"
-    key = db.generateKey()
-    print(key)
-    db.store(key, objSerial)
-    print(db.retrieve(key))
-
+    pass
 
 if __name__ == '__main__':
     main()

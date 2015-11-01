@@ -336,58 +336,11 @@ def cleanup():
         if len(game.players) == 0:
             db.removeFromList(GAME_WAITING_QUEUE, gameKey)
             numCleaned += 1
-    if numCleaned > 0:
-        print("cleaned {} games".format(numCleaned))
+    return numCleaned
 
 
 def main():
-    # just checking player state persistence
-    player = Player()
-    player.dbSave()
-    print(player)
-    playerKey = player.key
-    del player
-    player = Player(playerKey)
-    print(player)
-    assert player.key == playerKey
-
-    player.startOrJoinGame()
-    print(player.game)
-    player.game.dbSave()
-    del player
-
-    secondPlayer = Player()
-    print("Second {}".format(secondPlayer))
-    secondPlayer.startOrJoinGame()
-    secondPlayer.dbSave()
-
-    game = secondPlayer.game
-    print(game)
-    player = Player(playerKey)
-
-    print(game.gridString())
-
-    player = game.activePlayer
-    game.makeMove(player, [0, 0])
-    print(game.gridString())
-    player = game.activePlayer
-    game.makeMove(player, [0, 1])
-    print(game.gridString())
-    player = game.activePlayer
-    game.makeMove(player, [1, 0])
-    print(game.gridString())
-    player = game.activePlayer
-    game.makeMove(player, [0, 2])
-    print(game.gridString())
-    player = game.activePlayer
-    game.makeMove(player, [2, 0])
-    print(game.gridString())
-    player = game.activePlayer
-    try:
-        game.makeMove(player, [1, 1])
-        print(game.gridString())
-    except RuntimeError:
-        print("Good, good. Expected exception")
+    pass
 
 
 if __name__ == '__main__':
