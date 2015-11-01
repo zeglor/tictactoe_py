@@ -23,6 +23,8 @@
 #  
 
 from uuid import uuid4
+from redis import StrictRedis
+from secret import dbSettings
 
 
 class Db:
@@ -95,11 +97,45 @@ class DbTest(Db):
     def keyExists(self, key):
         return key in DbTest.storage
 
+class DbRedis(Db):
+    def __init__(self):
+        super().__init__()
+        self.redis = StrictRedis(**dbSettings)
+
+    def generateKey(self):
+        return self.redis.incr('id')
+
+    def store(self, key, objSerial):
+        self.redis.set(key, objSerial)
+
+    def retrieve(self, key):
+        return self.redis.get(key)
+
+    def lenList(self, name):
+        return self.redis.llen(name)
+
+    def listAppend(self, name, val):
+        self.redis.lpush(name,val)
+
+    def listPopLeft(self, name):
+        return self.redis.lpop(name)
+
+    def retrieveList(self, name):
+        return self.redis.lrange(name, 0, -1)
+
+    def removeFromList(self, name, item):
+        self.redis.lrem(name, item, 0)
+
+    def keyExists(self, key):
+        return self.redis.exists(key)
+
+
 
 def main():
-    db = DbTest.instance()
+    db = DbRedis.instance()
     objSerial = "test"
     key = db.generateKey()
+    print(key)
     db.store(key, objSerial)
     print(db.retrieve(key))
 

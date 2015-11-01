@@ -28,7 +28,7 @@ monkey.patch_all()
 from enum import Enum
 from random import choice
 from datetime import datetime
-from db import DbTest as Db
+from db import DbRedis as Db
 import json
 
 CONNECTION_TIMEOUT = 10  # max time since last request until the player is considered disconnected
@@ -105,10 +105,10 @@ class Game:
         obj["stateFrame"] = self.stateFrame
         obj["winner"] = self.winner.key if self.winner is not None else None
         obj["state"] = self.state
-        return json.dumps(obj, cls=EnumEncoder)
+        return json.dumps(obj, cls=EnumEncoder).encode('UTF8')
 
     def deserialize(self, objStr):
-        obj = json.loads(objStr, object_hook=as_enum)
+        obj = json.loads(objStr.decode('UTF8'), object_hook=as_enum)
         self.key = obj["key"]
         playerKeys = obj["players"]
         try:
@@ -279,10 +279,10 @@ class Player:
             #"knownGameState": self.knownGameState,
             "gameKey": self.game.key if self.game is not None else None
         }
-        return json.dumps(obj)
+        return json.dumps(obj).encode('UTF8')
 
     def deserialize(self, objStr, gameInst=None):
-        obj = json.loads(objStr)
+        obj = json.loads(objStr.decode('UTF8'))
         self.key = obj["key"]
         #self.knownGameState = obj["knownGameState"]
         if gameInst is not None:

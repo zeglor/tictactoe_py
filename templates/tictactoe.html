@@ -137,9 +137,7 @@
 		}
 		
 		function poll(){
-			console.log("starting poll");
 			var pollInterval = 0;
-			console.log("known game state: " + knownGameState);
 			$.ajax({
 				url: cServer + 'sub/',
 				type: "POST",
@@ -149,7 +147,6 @@
 				success: function(data){
 					console.log(data);
 					urgentStateUpdate = false;
-					console.log('Got message of type: ' + data['type']);
 					switch(data['type']){
 						case 'timeout':
 						pollInterval = cImmediate;
@@ -168,7 +165,6 @@
 							pollInterval = cDeferred;
 						break
 						case 'event':{
-							console.log("received game state: " + data['stateFrame']);
 							knownGameState = data['stateFrame'];
 							switch(data['state']){
 								case 'idle':
@@ -233,7 +229,8 @@
 				dataType: "json",
 				data: JSON.stringify(data),
 				error: function(error){
-					console.log("Error: " + error);
+					console.log("Error on heartbeat");
+					console.log(error);
 				},
 				complete: function(){
 					setTimeout(heartbeat, heartbeatInterval);
@@ -245,13 +242,12 @@
 			$("th").click(function(cell){
 				var colId = $(cell.target).parent().attr('name');
 				var rowId = $(cell.target).parent().parent().attr('name');
-				console.log("clicked [" + rowId + ", " + colId + "]")
 				placeToken(colId, rowId);
-				heartbeat();
 			});
 			$("#startNewGame").click(function(){
 				requestStartNewGame();
 			});
+			heartbeat();
 			hideNewGameButton();
 			poll();
 		});

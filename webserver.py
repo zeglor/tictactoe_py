@@ -58,7 +58,7 @@ class RemotePlayer:
 
 
 app = Flask(__name__)
-#app.debug = True
+app.debug = True
 app.secret_key = secret_key
 
 
@@ -73,7 +73,9 @@ def pub():
         if action == "heartbeat":
             #print("heartbeat from {}".format(player))
             # player gets automatically updated after request is finished
-            pass
+            # we should store only game state
+            if player.game is not None:
+                player.game.dbSave()
         elif action == "joinGame":
             #print('joining game: {}'.format(player))
             # pdb.set_trace()
@@ -82,7 +84,7 @@ def pub():
             #print("making move: {}".format(player))
             cellIndex = [int(indx) for indx in data.get("cell")]
             player.game.makeMove(player, cellIndex)
-    return 'OK'
+    return jsonify({'status': 'ok'})
 
 
 @app.route("/sub/", methods=["POST"])
@@ -100,7 +102,7 @@ def sub():
             isUrgentMessage = False
         pollTime = datetime.now()
         while (not game.hasUpdatesForPlayer(player)) and (not timeoutPassed(pollTime)) and not isUrgentMessage:
-            sleep(randUniform(0.1, 0.5))
+            sleep(randUniform(0.03, 0.3))
         # now we either have updates for player, or timeout passed, or player requested immediate update
         if timeoutPassed(pollTime):
             return jsonify({"type": "timeout"})
