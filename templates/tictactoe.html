@@ -51,10 +51,21 @@
 	</style>
 	<script src="../static/jquery-2.1.4.min.js"></script>
 	<script type="text/javascript">
+		var cServer = 'http://127.0.0.1:8080/';
+		
 		var canMove = false;
 		var myToken = '';
-		var knownState = 0;
+		var knownGameState = 0;
 		var isGameFinished = false;
+		// this variable is needed to update game status immediately after refresh/reconnect
+		// after successful request it is set to false
+		var urgentStateUpdate = true;
+		var heartbeatInterval = 5000;
+		
+		// time to wait before sending new poll request
+		var cImmediate = 0;
+		var cDeferred = 5000;
+		
 		function displayMessage(msg){
 			$("#messageString").text(msg);
 		}
@@ -71,9 +82,9 @@
 			hideNewGameButton();
 			displayMessage('Ждем второго игрока');
 			isGameFinished = false;
-			data = {action: "startNew"};
+			data = {"action": "joinGame", "knownGameState": knownGameState};
 			$.ajax({
-				url: "http://127.0.0.1:8080/pub/",
+				url: cServer + "pub/",
 				type: "POST",
 				contentType: "application/json",
 				dataType: "json",
@@ -106,12 +117,12 @@
 				return;
 			}
 			data = {
-					action: "put",
-					cellRow: rowId,
-					cellCol: colId,
+					"action": "move",
+					"cell": [colId, rowId],
+					"knownGameState": knownGameState,
 				};
 			$.ajax({
-				url: "http://127.0.0.1:8080/pub/",
+				url: cServer + "pub/",
 				type: "POST",
 				contentType: "application/json",
 				dataType: "json",
@@ -128,60 +139,104 @@
 		function poll(){
 			console.log("starting poll");
 			var pollInterval = 0;
-			console.log(knownState);
+			console.log("known game state: " + knownGameState);
 			$.ajax({
-				url: 'http://127.0.0.1:8080/sub/',
-				type: 'POST',
+				url: cServer + 'sub/',
 				type: "POST",
 				contentType: "application/json",
 				dataType: "json",
-				data: JSON.stringify({"knownState": knownState}),
+				data: JSON.stringify({"knownGameState": knownGameState, "urgent": urgentStateUpdate}),
 				success: function(data){
 					console.log(data);
-					knownState = data['stateFrame'];
-					switch(data['state']){
-						case 'waitingPlayers':
-							displayMessage('Ждем второго игрока');
-							isGameFinished = false;
+					urgentStateUpdate = false;
+					console.log('Got message of type: ' + data['type']);
+					switch(data['type']){
+						case 'timeout':
+						pollInterval = cImmediate;
+						isGameFinished = false;
 						break
-						case 'active':
-							updateGrid(data['grid']);
-							canMove = data['isYourTurn'];
-							myToken = data['yourToken'];
-							if(canMove){
-								displayMessage("Ваш ход");
+						case 'error':
+							if(data['reason'] == 'not_connected'){
+								displayMessage('Найдем игру?');
 							}
-							else{
-								displayMessage("Ход противника");
+							else {
+								displayMessage('Ой! Что-то пошло не так...');
+								knownGameState = 0;
 							}
-							isGameFinished = false;
-						break
-						case 'finished':
-							updateGrid(data['grid']);
 							isGameFinished = true;
-							if(data['winner'] == true)
-								displayMessage("Вы победили!");
-							else
-								displayMessage("Ваш противник победил.");
 							displayNewGameButton();
+							pollInterval = cDeferred;
 						break
-						case 'playerDisconnected':
-							isGameFinished = true;
-							displayMessage("Противник отключился. Попытаемся найти нового?");
-							displayNewGameButton();
-						case 'pollTimeout':
-							console.log("server poll timeout. reconnecting");
+						case 'event':{
+							console.log("received game state: " + data['stateFrame']);
+							knownGameState = data['stateFrame'];
+							switch(data['state']){
+								case 'idle':
+									displayNewGameButton();
+									isGameFinished = false;
+								break
+								case 'searchingPlayers':
+									displayMessage('Ждем второго игрока');
+									isGameFinished = false;
+								break
+								case 'active':
+									updateGrid(data['grid']);
+									canMove = data['isYourTurn'];
+									myToken = data['yourToken'];
+									if(canMove){
+										displayMessage("Ваш ход");
+									}
+									else{
+										displayMessage("Ход противника");
+									}
+									isGameFinished = false;
+								break
+								case 'playerLeft':
+									isGameFinished = true;
+									displayMessage("Противник отключился. Попытаемся найти нового?");
+									displayNewGameButton();
+								break
+								case 'finished':
+									updateGrid(data['grid']);
+									isGameFinished = true;
+									if(data['winner'] == true)
+										displayMessage("Вы победили! Порвем еще кого-нибудь?");
+									else if (data['winner'] == false)
+										displayMessage("Ваш противник победил. Попробуем отыграться?");
+									else
+										displayMessage("Ничья. Сыграем еще?");
+									displayNewGameButton();
+								break
+							}
+						}
 						break
 					}
-					pollInterval = 0;
+					pollInterval = cImmediate;
 				},
 				error: function(){
 					console.log('error');
-					pollInterval = 1000;
+					pollInterval = cDeferred;
 				},
 				complete: function(){
 					if(isGameFinished == false)
 						setTimeout(poll, pollInterval);
+				},
+			});
+		}
+		
+		function heartbeat(){
+			data = {"action": "heartbeat",};
+			$.ajax({
+				url: cServer + "pub/",
+				type: "POST",
+				contentType: "application/json",
+				dataType: "json",
+				data: JSON.stringify(data),
+				error: function(error){
+					console.log("Error: " + error);
+				},
+				complete: function(){
+					setTimeout(heartbeat, heartbeatInterval);
 				},
 			});
 		}
@@ -192,6 +247,7 @@
 				var rowId = $(cell.target).parent().parent().attr('name');
 				console.log("clicked [" + rowId + ", " + colId + "]")
 				placeToken(colId, rowId);
+				heartbeat();
 			});
 			$("#startNewGame").click(function(){
 				requestStartNewGame();

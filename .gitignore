@@ -60,3 +60,6 @@ target/
 
 # passwords, keys, etc
 secret.py
+
+# Pycharm settings
+.idea/

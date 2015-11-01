@@ -28,88 +28,100 @@
 # * Report his move														{"action": "move", "cell": [x, y]}
 
 from gevent import sleep, monkey, spawn
+
 monkey.patch_all()
 from gevent.wsgi import WSGIServer
 from flask import Flask, session, request, render_template, jsonify
-from game import Game, GameState, Player, cleanup
-from random import randint
+from game import Player, cleanup
+from random import uniform as randUniform
 from datetime import datetime
 from secret import secret_key
 
 POLL_TIMEOUT = 5
 
+
 class RemotePlayer:
-	def __init__(self, session):
-		playerKey = session.get("id")
-		self.player = Player(playerKey)
-		session["id"] = self.player.key
-		self.player.dbSave()
-		if self.player.game is not None:
-			self.player.game.dbSave()
-	
-	def __enter__(self):
-		return self.player
-	
-	def __exit__(self, type, value, traceback):
-		self.player.dbSave()
-		if self.player.game is not None:
-			self.player.game.dbSave()
+    def __init__(self, session, request):
+        playerKey = session.get("id")
+        knownGameState = request.get_json().get("knownGameState")
+        self.player = Player(playerKey, None, knownGameState)
+        session["id"] = self.player.key
+        self.player.dbSave()
+        #if self.player.game is not None:
+        #    self.player.game.dbSave()
+
+    def __enter__(self):
+        return self.player
+
+    def __exit__(self, type, value, traceback):
+        self.player.dbSave()
+
 
 app = Flask(__name__)
-app.debug = True
+#app.debug = True
 app.secret_key = secret_key
+
 
 @app.route("/pub/", methods=["POST"])
 def pub():
-	with RemotePlayer(session) as player:
-		data = request.get_json()
-		action = data.get("action")
-		
-		#process requested action
-		if action == "heartbeat":
-			print("heartbeat from {}".format(player))
-			# player gets automatically updated after request is finished
-			pass
-		elif action == "joinGame":
-			print("joining game: {}".format(player))
-			player.startOrJoinGame()
-		elif action == "move":
-			print("making move: {}".format(player))
-			cellIndex = data.get("cell")
-			player.game.makeMove(player, cellIndex)
-	return 'OK'
+    with RemotePlayer(session, request) as player:
+        data = request.get_json()
+        action = data.get("action")
+        #print("got request of type {}".format(action))
+
+        # process requested action
+        if action == "heartbeat":
+            #print("heartbeat from {}".format(player))
+            # player gets automatically updated after request is finished
+            pass
+        elif action == "joinGame":
+            #print('joining game: {}'.format(player))
+            # pdb.set_trace()
+            player.startOrJoinGame()
+        elif action == "move":
+            #print("making move: {}".format(player))
+            cellIndex = [int(indx) for indx in data.get("cell")]
+            player.game.makeMove(player, cellIndex)
+    return 'OK'
+
 
 @app.route("/sub/", methods=["POST"])
 def sub():
-	def timeoutPassed():
-		return (datetime.now() - self.pollTime).total_seconds() >= POLL_TIMEOUT
-	
-	with RemotePlayer(session) as player:
-		game = player.game
-		if game is None:
-			return jsonify({"type": "error", "reason": "not_connected"})
-		timeoutPassed.pollTime = datetime.now()
-		while (not game.hasUpdatesForPlayer(player)) and (not timeoutPassed()):
-			sleep(0.1)
-		# now we either have updates for player, or timeout passed
-		if timeoutPassed():
-			return jsonify({"type": "timeout"})
-		else:
-			msg = gameInst.getStateDict(player)
-			msg["type"] = "event"
-			return jsonify(msg)
+    def timeoutPassed(pollTime):
+        return (datetime.now() - pollTime).total_seconds() >= POLL_TIMEOUT
+
+    with RemotePlayer(session, request) as player:
+        game = player.game
+        if game is None:
+            return jsonify({"type": "error", "reason": "not_connected"})
+        try:
+            isUrgentMessage = request.get_json()["urgent"]
+        except KeyError:
+            isUrgentMessage = False
+        pollTime = datetime.now()
+        while (not game.hasUpdatesForPlayer(player)) and (not timeoutPassed(pollTime)) and not isUrgentMessage:
+            sleep(randUniform(0.1, 0.5))
+        # now we either have updates for player, or timeout passed, or player requested immediate update
+        if timeoutPassed(pollTime):
+            return jsonify({"type": "timeout"})
+        else:
+            # make message
+            msg = game.getStateDict(player)
+            msg["type"] = "event"
+            return jsonify(msg)
+
 
 @app.route("/")
 def index():
-	return render_template('tictactoe.html')
-
+    return render_template('tictactoe.html')
 
 def cleanup_forever():
-	while(True):
-		sleep(2)
-		cleanup()
+    while (True):
+        sleep(2)
+        cleanup()
+
 
 if __name__ == '__main__':
-	spawn(cleanup_forever)
-	http_server = WSGIServer(('', 8080), app)
-	http_server.serve_forever()
+    spawn(cleanup_forever)
+    http_server = WSGIServer(('', 8080), app)
+    http_server.serve_forever()
