@@ -119,7 +119,7 @@ def index():
 
 def cleanup_forever():
     while (True):
-        sleep(2)
+        sleep(60)
         cleanup()
 
 

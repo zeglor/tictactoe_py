@@ -26,6 +26,7 @@ from uuid import uuid4
 from redis import StrictRedis
 from secret import dbSettings
 
+TTL = 120
 
 class Db:
     _instance = None
@@ -106,7 +107,7 @@ class DbRedis(Db):
         return self.redis.incr('id')
 
     def store(self, key, objSerial):
-        self.redis.set(key, objSerial)
+        self.redis.setex(key, TTL, objSerial)
 
     def retrieve(self, key):
         return self.redis.get(key)
